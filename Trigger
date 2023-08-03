@@ -1,0 +1,128 @@
+********************* Apex class ************************
+
+public class OpportunityStageUpdateHandler {
+    public static void msgChatterUpdate(List<Opportunity> newOpps, Map<Id, Opportunity> newOppsMap, List<Opportunity> oldOpps) {
+        // Collect the old and new Opportunity stages along with Account Name in a map
+        Map<Id, Opportunity> opportunityMap = new Map<Id, Opportunity>();
+        Set<Id> accountIds = new Set<Id>();
+        
+        for (Opportunity opp : oldOpps) {
+            if (newOppsMap.get(opp.Id).StageName != opp.StageName) {
+                opportunityMap.put(opp.Id, opp);
+                if (opp.AccountId != null) {
+                    accountIds.add(opp.AccountId);
+                }
+            }
+        }
+        
+        // Fetch Account Names for the collected Account Ids
+        Map<Id, Account> accountMap = new Map<Id, Account>();
+        if (!accountIds.isEmpty()) {
+            accountMap = new Map<Id, Account>([SELECT Id, Name FROM Account WHERE Id IN :accountIds]);
+        }
+        
+        // Prepare and post the Chatter messages
+        List<FeedItem> chatterMessages = new List<FeedItem>();
+        for (Id oppId : opportunityMap.keySet()) {
+            Opportunity oldOpp = opportunityMap.get(oppId);
+            Opportunity newOpp = newOppsMap.get(oppId);
+            String oldStage = oldOpp.StageName;
+            String newStage = newOpp.StageName;
+            String accountName = '';
+            
+            if (newOpp.AccountId != null && accountMap.containsKey(newOpp.AccountId)) {
+                accountName = accountMap.get(newOpp.AccountId).Name;
+            }
+            
+            // Create the Chatter message content with plain text and clickable links
+            String chatterMessage = 'Opportunity Stage Updated:';
+            chatterMessage += '\nOld Stage: ' + oldStage;
+            chatterMessage += '\nNew Stage: ' + newStage;
+            if (!String.isBlank(accountName)) {
+                chatterMessage += '\nAccount Name: ' + getAccountLink(newOpp.AccountId, accountName);
+            }
+
+            // Create and add the Chatter message to the list
+            FeedItem feedItem = new FeedItem();
+            feedItem.ParentId = oppId;
+            feedItem.Body = chatterMessage;
+            feedItem.IsRichText=true;
+            feedItem.Type = 'AdvancedTextPost';
+            chatterMessages.add(feedItem);
+        }
+
+        // Insert the Chatter messages
+        if (!chatterMessages.isEmpty()) {
+            try {
+                Database.SaveResult[] results = Database.insert(chatterMessages, false);
+                
+                // Handle errors
+                for (Database.SaveResult result : results) {
+                    if (!result.isSuccess()) {
+                        // Handle error here
+                        System.debug('@@@Error inserting FeedItem: ' + result.getErrors()[0].getMessage());
+                    }
+                }
+                
+                System.debug('@@@Chatter messages inserted successfully');
+            } catch (Exception e) {
+                // Handle exception here
+                System.debug('@@@Exception inserting FeedItems: ' + e.getMessage());
+            }
+        } else {
+            System.debug('@@@No Chatter messages to insert');
+        }
+    }
+
+    
+    // Helper method to get the Account URL based on Account Id and format it as a clickable link
+       @TestVisible
+    private static String getAccountLink(Id accountId, String accountName) {
+        String accountUrl = URL.getSalesforceBaseUrl().toExternalForm() + '/' + accountId;
+        return '<a href="' + accountUrl + '">' + accountName + '</a>';
+    }
+}
+
+************************ Trigger ************************
+
+trigger OpportunityStageUpdate on Opportunity (after update) {
+    if (Trigger.isAfter && Trigger.isUpdate) {
+      OpportunityStageUpdateHandler.msgChatterUpdate(Trigger.new, Trigger.newMap, Trigger.old);
+    }
+}
+
+********************** Test class ************************
+
+@isTest
+private class OpportunityStageUpdateHandlerTest {
+    @isTest static void testMsgChatterUpdate() {
+        // Create test data
+        Account testAccount = new Account(Name = 'Test Account');
+        insert testAccount;
+        
+        Opportunity testOpp = new Opportunity(
+            Name = 'Test Opp',
+            StageName = 'Prospecting',
+            CloseDate = Date.today(),
+            AccountId = testAccount.Id
+        );
+        insert testOpp;
+        
+        // Update the Opportunity stage
+        testOpp.StageName = 'Closed Won';
+        update testOpp;
+        
+        // Call the msgChatterUpdate method
+        List<Opportunity> newOpps = [SELECT Id, StageName, AccountId FROM Opportunity WHERE Id = :testOpp.Id];
+        Map<Id, Opportunity> newOppsMap = new Map<Id, Opportunity>(newOpps);
+        List<Opportunity> oldOpps = [SELECT Id, StageName, AccountId FROM Opportunity WHERE Id = :testOpp.Id];
+        
+        Test.startTest();
+        OpportunityStageUpdateHandler.msgChatterUpdate(newOpps, newOppsMap, oldOpps);
+        Test.stopTest();
+        
+        // Verify that a Chatter message was posted
+        List<FeedItem> feedItems = [SELECT Id, Body FROM FeedItem WHERE ParentId = :testOpp.Id];
+        System.assertEquals(1, feedItems.size());
+    }
+}
